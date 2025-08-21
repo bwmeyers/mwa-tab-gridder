@@ -25,6 +25,7 @@ def hex_grid_tangent_plane(
     spacing = fov_deg * (1 - overlap_frac)  # allow beam overlap
     dx = spacing  # horizontal spacing
     dy = spacing * np.sqrt(3) / 2  # vertical spacing
+    # TODO: Probably need to figure out how to pack elliptical beams with arb rotation, etc....
 
     # Loop over concentric hex rings
     pointings = []
@@ -90,6 +91,7 @@ def plot_pointings_with_projection(
     ax.set_ylabel("Dec")
 
     # Plot beams
+    # TODO: Allow elliptical beams to be plotted?
     for p in pointings:
         circle = SphericalCircle(
             (p.ra, p.dec),
@@ -112,11 +114,12 @@ def plot_pointings_with_projection(
         frame="icrs",
     )
     x_pix, y_pix = wcs.world_to_pixel(corners_world)
+    pad = fov_deg / pixel_scale
 
-    x_min = np.min(x_pix) - 50
-    x_max = np.max(x_pix) + 50
-    y_min = np.min(y_pix) - 50
-    y_max = np.max(y_pix) + 50
+    x_min = np.min(x_pix) - pad
+    x_max = np.max(x_pix) + pad
+    y_min = np.min(y_pix) - pad
+    y_max = np.max(y_pix) + pad
 
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
@@ -127,12 +130,14 @@ def plot_pointings_with_projection(
 
 if __name__ == "__main__":
     # Example parameters
-    center = SkyCoord(ra=180 * u.deg, dec=-60 * u.deg, frame="icrs")
-    fov_major = 0.5  # degrees
-    fov_minor = 0.5  # degrees
-    overlap = 0.2  # 20% overlap
-    n_rings = 2  # 2 rings = 19 total beams
-    pa = 0  # ellipse rotated 30 deg east of north
+    center = SkyCoord(
+        "20:46:00.1", "-04:21:26.2", unit=("hourangle", "deg"), frame="icrs"
+    )
+    fov_major = 0.06  # degrees
+    fov_minor = 0.06  # degrees
+    overlap = 0.3  # XX% overlap
+    n_rings = 3  # N rings = 1 + 6*N*(N-1)/2 total beams (centered-hexagonal numbers)
+    pa = 0  # ellipse rotated XX deg east of north
 
     grid_points = hex_grid_tangent_plane(
         center, min((fov_major, fov_minor)), overlap, n_rings
