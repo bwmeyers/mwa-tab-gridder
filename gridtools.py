@@ -22,7 +22,7 @@ def hex_grid_tangent_plane(
     tangent_frame = SkyOffsetFrame(origin=center)
 
     # Hex grid setup in tangent plane (offsets in degrees)
-    spacing = fov_deg * (1 - overlap_frac)  # allow beam overlap
+    spacing = 2 * fov_deg * (1 - overlap_frac)  # allow beam overlap
     dx = spacing  # horizontal spacing
     dy = spacing * np.sqrt(3) / 2  # vertical spacing
     # TODO: Probably need to figure out how to pack elliptical beams with arb rotation, etc....
@@ -38,7 +38,7 @@ def hex_grid_tangent_plane(
             pointings.append(offset.transform_to("icrs"))
         else:
             for i in range(6):  # 6 sides of hexagon
-                angle = np.pi / 3 * i
+                angle = (np.pi / 3) * i
                 for j in range(r):
                     # Compute hex steps
                     x = (r * np.cos(angle) - j * np.cos(angle + np.pi / 3)) * dx
@@ -56,7 +56,9 @@ def hex_grid_tangent_plane(
 def plot_pointings_with_projection(
     pointings: list[SkyCoord],
     projection_center: SkyCoord = None,
-    fov_deg: float = 1.0,
+    fov_maj_deg: float = 0.5,
+    fov_min_deg: float = 0.5,
+    pa: float = 0,
 ) -> None:
 
     # If there's no preferred projection centre, just use the first position in the list
@@ -92,16 +94,24 @@ def plot_pointings_with_projection(
 
     # Plot beams
     # TODO: Allow elliptical beams to be plotted?
+
     for p in pointings:
         circle = SphericalCircle(
             (p.ra, p.dec),
-            (fov_deg / 2) * u.deg,  # radius
+            fov_maj_deg * u.deg,  # radius
             edgecolor="blue",
             facecolor="none",
             transform=ax.get_transform("world"),
             alpha=0.6,
         )
         ax.add_patch(circle)
+        ax.scatter(
+            x=p.ra,
+            y=p.dec,
+            s=20,
+            color="blue",
+            transform=ax.get_transform("world"),
+        )
 
     # Auto-adjust plot limits based on beam positions
     ra_vals = np.array([p.ra.deg for p in pointings])
@@ -114,7 +124,7 @@ def plot_pointings_with_projection(
         frame="icrs",
     )
     x_pix, y_pix = wcs.world_to_pixel(corners_world)
-    pad = fov_deg / pixel_scale
+    pad = 1.1 * max((fov_maj_deg, fov_min_deg)) / pixel_scale
 
     x_min = np.min(x_pix) - pad
     x_max = np.max(x_pix) + pad
@@ -133,16 +143,20 @@ if __name__ == "__main__":
     center = SkyCoord(
         "20:46:00.1", "-04:21:26.2", unit=("hourangle", "deg"), frame="icrs"
     )
-    fov_major = 0.06  # degrees
-    fov_minor = 0.06  # degrees
-    overlap = 0.3  # XX% overlap
-    n_rings = 3  # N rings = 1 + 6*N*(N-1)/2 total beams (centered-hexagonal numbers)
-    pa = 0  # ellipse rotated XX deg east of north
+    fov_major = 0.03  # degrees
+    fov_minor = 0.03  # degrees
+    overlap = 0.2  # XX% overlap
+    n_rings = 1  # N rings = 1 + 6*N*(N-1)/2 total beams (centered-hexagonal numbers, one-based)
+    n_pt = 1 + 6 * (n_rings + 1) * (n_rings) // 2  # zero-based
+    pa = 30  # ellipse rotated XX deg east of north
 
-    grid_points = hex_grid_tangent_plane(
-        center, min((fov_major, fov_minor)), overlap, n_rings
+    print(
+        f"Generating central hex grid with {n_rings} concentric rings = {n_pt} pointings"
     )
-    plot_pointings_with_projection(grid_points, fov_deg=min((fov_major, fov_minor)))
+    grid_points = hex_grid_tangent_plane(center, fov_major, overlap, n_rings)
+    plot_pointings_with_projection(
+        grid_points, fov_maj_deg=fov_major, fov_min_deg=fov_minor, pa=pa
+    )
 
     for gp in grid_points:
         print(f"{gp.to_string('hmsdms', sep=':', pad=True, precision=3)}")
