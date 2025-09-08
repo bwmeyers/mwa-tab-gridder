@@ -225,6 +225,7 @@ def mwa_gridder_cli() -> None:
         for the center of the grid. (Enter as a single string, space delimited, i.e., 
           'hh:mm:ss ±dd:mm:ss' 
         to ensure correct parsing.)""",
+        required=True,
     )
     parser.add_argument(
         "-n",
@@ -253,6 +254,11 @@ def mwa_gridder_cli() -> None:
         help="Show plot of computed pointings on the sky plane.",
         default=False,
     )
+
+    generate_mwa_grid(parser)
+
+
+def generate_mwa_grid(parser: argparse.ArgumentParser):
     args = parser.parse_args()
 
     # Get basic array configuration
@@ -296,3 +302,7 @@ def mwa_gridder_cli() -> None:
         with open("pointings.txt", "w") as fh:
             for gp in grid_points:
                 fh.write(f"{gp.to_string('hmsdms', sep=':', pad=True, precision=3)}\n")
+
+
+if __name__ == "__main__":
+    mwa_gridder_cli()
