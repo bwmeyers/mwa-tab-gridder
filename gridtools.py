@@ -5,6 +5,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.spatial.distance import cdist
 
+import arviz as az
+from arviz.plots.plot_utils import calculate_point_estimate
+
 from astropy.coordinates import SkyCoord, SkyOffsetFrame
 import astropy.units as u
 import astropy.constants as c
@@ -186,7 +189,11 @@ def find_maximum_mwa_baseline(
     dist = cdist(tile_positions, tile_positions)
     dist = np.delete(dist.flatten(), np.where(dist.flatten() <= 0.01))  # remove autos
 
-    return max(dist) * u.m, dist * u.m
+    # use a KDE approach to estimate the mode of the baseline distribution
+    dist_mode = calculate_point_estimate("mode", dist) * u.m
+    dist_hdi = az.hdi(dist, hdi_prob=0.75, multimodal=True) * u.m
+
+    return dist_mode, max(dist) * u.m, dist_hdi, dist * u.m
 
 
 def mwa_gridder_cli() -> None:
@@ -254,6 +261,12 @@ def mwa_gridder_cli() -> None:
         help="Show plot of computed pointings on the sky plane.",
         default=False,
     )
+    parser.add_argument(
+        "--use_simple_fov",
+        action="store_true",
+        help="Use a naive FWHM = 1.22λ/B approximation.",
+        default=False,
+    )
 
     generate_mwa_grid(parser)
 
@@ -265,18 +278,31 @@ def generate_mwa_grid(parser: argparse.ArgumentParser):
     if args.metafits is not None:
         mwa_context = MetafitsContext(args.metafits)
         freq_hz = mwa_context.centre_freq_hz * u.Hz
-        max_baseline = find_maximum_mwa_baseline(mwa_context)[0]
+        eff_bline, max_bline, hdi_bline, blines = find_maximum_mwa_baseline(mwa_context)
+        eff_bline = np.max(hdi_bline)
+        # Take the maximum of the HDI as the effective array Bmax, as it represents that 75% of
+        # baselines are equal or less than this value (i.e. short baselines dominate),
+        # while preserving the fact that there are sufficient baselines of length > max(HDI)
+        # which will act to increase the effective array Bmax.
 
     # Overrides, if provides
     if args.freq:
         freq_hz = args.freq * u.Hz
     if args.bmax:
-        max_baseline = args.bmax * u.m
+        eff_bline = args.bmax * u.m
 
-    fov = fwhm(freq_hz, max_baseline)
-    print(f"Maximum baseline, B = {max_baseline:g}")
+    if args.use_simple_fov:
+        fov = fwhm(freq_hz, max_bline, scale=None)
+    else:
+        fov = fwhm(freq_hz, eff_bline, scale=None)
+    print(f"Maximum baseline, Bmax = {max_bline:g}")
+    print(f"Effective baseline, Beff = {eff_bline:g}")
     print(f"Centre frequency, f = {freq_hz.to(u.MHz):g}  λ = {(c.c/freq_hz).to(u.m):g}")
-    print(f"FWHM ~ 1.22λ/B ~ {fov.to(u.deg):g} = {fov.to(u.arcmin):g}")
+    if args.use_simple_fov:
+        print(f"FWHM ~ λ/Bmax ~ {fov.to(u.deg):g} = {fov.to(u.arcmin):g}")
+    else:
+        print(f"FWHM ~ λ/Beff ~ {fov.to(u.deg):g} = {fov.to(u.arcmin):g}")
+
     center = SkyCoord(
         f"{args.center.split(' ')[0]}",
         f"{args.center.split(' ')[1]}",
