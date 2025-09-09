@@ -351,6 +351,8 @@ def generate_mwa_grid(parser: argparse.ArgumentParser):
         freq_hz = args.freq * u.Hz
     if args.bmax:
         eff_bline = args.bmax * u.m
+        char_bline = eff_bline
+        max_bline = eff_bline
 
     if args.use_simple_fov:
         fov = fwhm(freq_hz, max_bline, scale="airy")
