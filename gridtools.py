@@ -117,7 +117,7 @@ def plot_pointings_with_projection(
     # Prepare figure
     fig = plt.figure(figsize=plt.figaspect(0.9), constrained_layout=True)
     ax = fig.add_subplot(111, projection=wcs)
-    ax.set_title("Sky Pointings with in Gnomonic (TAN) Projection")
+    ax.set_title("Sky Pointings in Gnomonic (TAN) Projection")
     ax.set_xlabel("Right Ascension (J2000)")
     ax.set_ylabel("Declination (J2000)")
 
@@ -174,6 +174,7 @@ def plot_pointings_with_projection(
 
 def find_maximum_mwa_baseline(
     context: MetafitsContext,
+    hdi_prob: float = 0.90,
 ) -> tuple[u.Quantity["length"], np.ndarray[u.Quantity["length"]]]:
     """From the observation metadata, compute the tile maximum baseline."""
     tile_positions = np.array(
@@ -191,9 +192,54 @@ def find_maximum_mwa_baseline(
 
     # use a KDE approach to estimate the mode of the baseline distribution
     dist_mode = calculate_point_estimate("mode", dist) * u.m
-    dist_hdi = az.hdi(dist, hdi_prob=0.75, multimodal=True) * u.m
+    dist_hdi = az.hdi(dist, hdi_prob=hdi_prob, multimodal=False)
 
     return dist_mode, max(dist) * u.m, dist_hdi, dist * u.m
+
+
+def plot_mwa_baseline_distribution(
+    context: MetafitsContext,
+    hdi_prob: float = 0.90,
+) -> None:
+    """Plot the baseline distribution and indicate the highest-density interval(s)."""
+
+    b_eff, b_max, hdi, b = find_maximum_mwa_baseline(context, hdi_prob=hdi_prob)
+
+    tile_flags = np.array([rf.flagged for rf in context.rf_inputs if rf.pol == Pol.X])
+    num_ok_tiles = (~tile_flags).sum()
+    num_bad_tiles = (tile_flags).sum()
+
+    fig = plt.figure(figsize=(8, 6))
+    ax = fig.add_subplot()
+    ax.hist([x.value for x in b], bins=np.arange(0, b.max().value, 10))
+    ymax = max(ax.get_ylim())
+
+    ax.fill_between(hdi, 0, ymax, color="0.8", alpha=0.5)
+    ax.axvline(b_eff.value, ls=":", color="k")
+    ax.text(
+        x=0.95,
+        y=0.95,
+        s=f"Number of baselines = {len(b)}\n"
+        + f"Number of 'good' tiles = {num_ok_tiles}\n"
+        + f"Number of flagged tiles = {num_bad_tiles}",
+        transform=ax.transAxes,
+        va="top",
+        ha="right",
+        fontsize=12,
+    )
+    plt.xlim(0, None)
+    plt.ylim(None, ymax)
+    plt.xlabel("Baseline length (m)", fontsize=14)
+    plt.ylabel("Frequency of baseline length", fontsize=14)
+    plt.title(
+        f"Observation ID: {context.obs_id}  ({context.sched_start_utc})\n"
+        + rf"Max. baseline $\approx$ {b_max:.0f} "
+        + rf"Characteristic baseline $\approx$ {b_eff:.0f}"
+    )
+    plt.minorticks_on()
+    plt.tick_params(labelsize=12)
+    plt.savefig(f"{context.obs_id}_baseline_dist.png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
 
 def mwa_gridder_cli() -> None:
@@ -212,6 +258,7 @@ def mwa_gridder_cli() -> None:
         beam shape, and the FWHM will be set conservatively to be the radius of 
         the inscribing circle.)
         """,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("-m", "--metafits", type=str, help="MWA Metafits file.")
     parser.add_argument(
@@ -264,8 +311,15 @@ def mwa_gridder_cli() -> None:
     parser.add_argument(
         "--use_simple_fov",
         action="store_true",
-        help="Use a naive FWHM = 1.22λ/B approximation.",
+        help="Use a naive FWHM = 1.22λ/Bmax approximation.",
         default=False,
+    )
+    parser.add_argument(
+        "--eff_baseline_frac",
+        type=float,
+        help="""Calculate the effective baseline by ensuring this fraction of
+        baselines are captured within the highest density interval.""",
+        default=0.90,
     )
 
     generate_mwa_grid(parser)
@@ -278,12 +332,19 @@ def generate_mwa_grid(parser: argparse.ArgumentParser):
     if args.metafits is not None:
         mwa_context = MetafitsContext(args.metafits)
         freq_hz = mwa_context.centre_freq_hz * u.Hz
-        eff_bline, max_bline, hdi_bline, blines = find_maximum_mwa_baseline(mwa_context)
-        eff_bline = np.max(hdi_bline)
-        # Take the maximum of the HDI as the effective array Bmax, as it represents that 75% of
-        # baselines are equal or less than this value (i.e. short baselines dominate),
-        # while preserving the fact that there are sufficient baselines of length > max(HDI)
-        # which will act to increase the effective array Bmax.
+        char_bline, max_bline, hdi_bline, blines = find_maximum_mwa_baseline(
+            mwa_context,
+            hdi_prob=args.eff_baseline_frac,
+        )
+        plot_mwa_baseline_distribution(
+            mwa_context,
+            hdi_prob=args.eff_baseline_frac,
+        )
+        eff_bline = np.max(hdi_bline) * u.m
+        # Take the maximum of the HDI (highest density interval) as the effective array Bmax,
+        # as it represents that (eff_baseline_frac * 100)% of baselines are equal or less than
+        # this value, i.e., short baselines dominate while preserving the fact that there are
+        # sufficient baselines of length > max(HDI) which will act to increase the effective array Bmax.
 
     # Overrides, if provides
     if args.freq:
@@ -292,14 +353,15 @@ def generate_mwa_grid(parser: argparse.ArgumentParser):
         eff_bline = args.bmax * u.m
 
     if args.use_simple_fov:
-        fov = fwhm(freq_hz, max_bline, scale=None)
+        fov = fwhm(freq_hz, max_bline, scale="airy")
     else:
         fov = fwhm(freq_hz, eff_bline, scale=None)
     print(f"Maximum baseline, Bmax = {max_bline:g}")
+    print(f"Approx. mode of baselines = {char_bline:g}")
     print(f"Effective baseline, Beff = {eff_bline:g}")
     print(f"Centre frequency, f = {freq_hz.to(u.MHz):g}  λ = {(c.c/freq_hz).to(u.m):g}")
     if args.use_simple_fov:
-        print(f"FWHM ~ λ/Bmax ~ {fov.to(u.deg):g} = {fov.to(u.arcmin):g}")
+        print(f"FWHM ~ 1.22λ/Bmax ~ {fov.to(u.deg):g} = {fov.to(u.arcmin):g}")
     else:
         print(f"FWHM ~ λ/Beff ~ {fov.to(u.deg):g} = {fov.to(u.arcmin):g}")
 
