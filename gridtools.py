@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 from scipy.spatial.distance import cdist
 
 import arviz as az
-from arviz.plots.plot_utils import calculate_point_estimate
 
 from astropy.coordinates import SkyCoord, SkyOffsetFrame
 import astropy.units as u
@@ -25,17 +24,20 @@ def hex_grid_tangent_plane(
 ) -> list[SkyCoord]:
 
     # Define a default for the FoV in case it is not provided.
-    if fov == None:
+    if fov is None:
         fov = 0.5 * u.deg
+    else:
+        fov = fov.to(u.deg)
 
     # Define a local tangent-plane coordinate frame centered on `center`
     tangent_frame = SkyOffsetFrame(origin=center)
 
     # Hex grid setup in tangent plane (offsets in degrees)
-    spacing = 2 * fov.to(u.deg) * (1 - overlap_frac)  # allow beam overlap
+    spacing = 2 * fov * (1 - overlap_frac)  # allow beam overlap
     dx = spacing  # horizontal spacing in degrees
     dy = spacing * np.sqrt(3) / 2  # vertical spacing in degrees
-    # TODO: Probably need to figure out how to pack elliptical beams with arb rotation, etc....
+    # TODO: Probably need to figure out how to pack elliptical beams
+    # with arb rotation, etc....
 
     # Loop over concentric hex rings
     pointings = []
@@ -51,8 +53,12 @@ def hex_grid_tangent_plane(
                 angle = (np.pi / 3) * i
                 for j in range(r):
                     # Compute hex steps
-                    x = (r * np.cos(angle) - j * np.cos(angle + np.pi / 3)) * dx
-                    y = (r * np.sin(angle) - j * np.sin(angle + np.pi / 3)) * dy
+                    x = (
+                        r * np.cos(angle) - j * np.cos(angle + np.pi / 3)
+                    ) * dx
+                    y = (
+                        r * np.sin(angle) - j * np.sin(angle + np.pi / 3)
+                    ) * dy
 
                     # Create offset in tangent plane
                     offset = SkyCoord(x, y, frame=tangent_frame)
@@ -68,7 +74,8 @@ def fwhm(
     max_baseline: u.Quantity["length"],
     scale: str | None = "airy",
 ) -> u.Quantity["angle"]:
-    """Convert a provided observing frequency and maximum array baseline to a nominal FWHM."""
+    """Convert a provided observing frequency and maximum array baseline
+    to a nominal FWHM."""
 
     if scale == "airy":
         scale = 1.22 * u.radian
@@ -76,7 +83,7 @@ def fwhm(
         scale = 1 * u.radian
 
     wl = c.c / freq_hz
-    th = (scale * wl / max_baseline).decompose().to(u.radian)
+    th = (scale * wl / max_baseline).decompose()
     return th
 
 
@@ -86,8 +93,10 @@ def plot_pointings_with_projection(
     wcs_config: WCS | dict | None = None,
 ) -> None:
 
-    if fov == None:
+    if fov is None:
         fov = 0.5 * u.deg
+    else:
+        fov = fov.to(u.deg)
 
     if isinstance(wcs_config, dict):
         wcs = WCS(wcs_config)
@@ -135,8 +144,8 @@ def plot_pointings_with_projection(
         )
         ax.add_patch(circle)
         ax.scatter(
-            x=p.ra,
-            y=p.dec,
+            p.ra,
+            p.dec,
             s=20,
             color="blue",
             transform=ax.get_transform("world"),
@@ -147,35 +156,22 @@ def plot_pointings_with_projection(
         label=f"{fov.to(u.arcmin).value:.1f}'",
     )
 
-    # Auto-adjust plot limits based on beam positions
-    ra_vals = np.array([p.ra.deg for p in pointings])
-    dec_vals = np.array([p.dec.deg for p in pointings])
-
-    # Convert corners to pixel coords using WCS
-    corners_world = SkyCoord(
-        [ra_vals.min(), ra_vals.max(), ra_vals.min(), ra_vals.max()] * u.deg,
-        [dec_vals.min(), dec_vals.min(), dec_vals.max(), dec_vals.max()] * u.deg,
-        frame="icrs",
-    )
-    x_pix, y_pix = wcs.world_to_pixel(corners_world)
-    pad = 1.2 * fov.to(u.deg).value / pixel_scale
-
-    x_min = np.min(x_pix) - pad
-    x_max = np.max(x_pix) + pad
-    y_min = np.min(y_pix) - pad
-    y_max = np.max(y_pix) + pad
-
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
-
     ax.grid(color="gray", ls="dotted")
-    plt.show()
+    plt.savefig(
+        "pointing_grid.png", dpi=200, bbox_inches="tight"
+    )
 
 
 def find_maximum_mwa_baseline(
     context: MetafitsContext,
     hdi_prob: float = 0.90,
-) -> tuple[u.Quantity["length"], np.ndarray[u.Quantity["length"]]]:
+    extra_tile_flags: list[str] | None = None
+) -> tuple[
+    u.Quantity["length"],
+    u.Quantity["length"],
+    np.ndarray,
+    np.ndarray,
+]:
     """From the observation metadata, compute the tile maximum baseline."""
     tile_positions = np.array(
         [
@@ -184,28 +180,64 @@ def find_maximum_mwa_baseline(
             if rf.pol == Pol.X
         ]
     )
-    tile_flags = np.array([rf.flagged for rf in context.rf_inputs if rf.pol == Pol.X])
-    tile_positions = np.delete(tile_positions, np.where(tile_flags & True), axis=0)
+    tile_flags = np.array(
+        [rf.flagged for rf in context.rf_inputs if rf.pol == Pol.X]
+    )
+
+    if extra_tile_flags is not None:
+        itile = 0
+        for rf in context.rf_inputs:
+            if rf.pol != Pol.X:
+                continue
+            if rf.tile_name in extra_tile_flags or str(rf.tile_id) in extra_tile_flags:
+                tile_flags[itile] = True
+            itile += 1
+
+    tile_positions = np.delete(
+        tile_positions, np.where(tile_flags & True), axis=0
+    )
 
     dist = cdist(tile_positions, tile_positions)
-    dist = np.delete(dist.flatten(), np.where(dist.flatten() <= 0.01))  # remove autos
+    dist = np.delete(
+        dist.flatten(), np.where(dist.flatten() <= 0.01)
+    )  # remove autos
+    max_dist = np.max(dist) * u.m
+    distances = dist * u.m
 
     # use a KDE approach to estimate the mode of the baseline distribution
-    dist_mode = calculate_point_estimate("mode", dist) * u.m
-    dist_hdi = az.hdi(dist, hdi_prob=hdi_prob, multimodal=False)
+    grid, density = az.kde(dist)
+    dist_mode = grid[np.argmax(density)] * u.m
+    dist_hdi = np.asarray(az.hdi(dist, hdi_prob=hdi_prob, multimodal=False)) * 1*u.m
 
-    return dist_mode, max(dist) * u.m, dist_hdi, dist * u.m
+    return dist_mode, max_dist, dist_hdi, distances
 
 
 def plot_mwa_baseline_distribution(
     context: MetafitsContext,
     hdi_prob: float = 0.90,
+    extra_tile_flags: list[str] | None = None
 ) -> None:
-    """Plot the baseline distribution and indicate the highest-density interval(s)."""
+    """Plot the baseline distribution and indicate the highest-density
+    interval(s)."""
+    b_mode, b_max, hdi, b = find_maximum_mwa_baseline(
+        context,
+        hdi_prob=hdi_prob,
+        extra_tile_flags=extra_tile_flags,
+    )
+    b_eff = hdi.max()
 
-    b_eff, b_max, hdi, b = find_maximum_mwa_baseline(context, hdi_prob=hdi_prob)
+    tile_flags = np.array(
+        [rf.flagged for rf in context.rf_inputs if rf.pol == Pol.X]
+    )
+    if extra_tile_flags is not None:
+        itile = 0
+        for rf in context.rf_inputs:
+            if rf.pol != Pol.X:
+                continue
+            if rf.tile_name in extra_tile_flags or str(rf.tile_id) in extra_tile_flags:
+                tile_flags[itile] = True
+            itile += 1
 
-    tile_flags = np.array([rf.flagged for rf in context.rf_inputs if rf.pol == Pol.X])
     num_ok_tiles = (~tile_flags).sum()
     num_bad_tiles = (tile_flags).sum()
 
@@ -214,7 +246,7 @@ def plot_mwa_baseline_distribution(
     ax.hist([x.value for x in b], bins=np.arange(0, b.max().value, 10))
     ymax = max(ax.get_ylim())
 
-    ax.fill_between(hdi, 0, ymax, color="0.8", alpha=0.5)
+    ax.fill_between([h.value for h in hdi], 0, ymax, color="0.8", alpha=0.5)
     ax.axvline(b_eff.value, ls=":", color="k")
     ax.text(
         x=0.95,
@@ -238,7 +270,9 @@ def plot_mwa_baseline_distribution(
     )
     plt.minorticks_on()
     plt.tick_params(labelsize=12)
-    plt.savefig(f"{context.obs_id}_baseline_dist.png", dpi=200, bbox_inches="tight")
+    plt.savefig(
+        f"{context.obs_id}_baseline_dist.png", dpi=200, bbox_inches="tight"
+    )
     plt.close(fig)
 
 
@@ -246,38 +280,45 @@ def mwa_gridder_cli() -> None:
     parser = argparse.ArgumentParser(
         prog="mwa_gridder",
         description="""
-        A tool to calculate tied-array beam pointing directions in an 
+        A tool to calculate tied-array beam pointing directions in an
         organised centered hexagonal grid around a provided central point.
         """,
         epilog="""
-        NOTE: The tied-array beam FWHM can often be asymmetric, 
-        especially far from zenith. In those cases it is best to either increase 
-        the overlap fraction. 
+        NOTE: The tied-array beam FWHM can often be asymmetric,
+        especially far from zenith. In those cases it is best to either
+        increase the overlap fraction.
 
-        (In future releases, we will add the ability to simulate the tied-array 
-        beam shape, and the FWHM will be set conservatively to be the radius of 
+        (In future releases, we will add the ability to simulate the tied-array
+        beam shape, and the FWHM will be set conservatively to be the radius of
         the inscribing circle.)
         """,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("-m", "--metafits", type=str, help="MWA Metafits file.")
     parser.add_argument(
-        "--freq",
-        type=float,
-        help="Observing frequency (Hz). Overrides what is in provided metafits file.",
+        "-m", "--metafits", type=str, help="MWA Metafits file."
     )
     parser.add_argument(
+        "-f",
+        "--freq",
+        type=float,
+        help="Observing frequency (Hz). Overrides what is in provided "
+        "metafits file.",
+    )
+    parser.add_argument(
+        "-B",
         "--bmax",
         type=float,
-        help="Maximum baseline (m) during observation. Overrides what is in provided metafits file.",
+        help="Maximum baseline (m) during observation. Overrides what is in "
+        "provided metafits file.",
     )
     parser.add_argument(
         "-c",
         "--center",
         type=str,
-        help="""The J2000 Right Ascension (hh:mm:ss) and Declination (±dd:mm:ss) 
-        for the center of the grid. (Enter as a single string, space delimited, i.e., 
-          'hh:mm:ss ±dd:mm:ss' 
+        help="""The J2000 Right Ascension (hh:mm:ss) and
+        Declination (±dd:mm:ss) for the center of the grid.
+        (Enter as a single string, space delimited, i.e.,
+          'hh:mm:ss ±dd:mm:ss'
         to ensure correct parsing.)""",
         required=True,
     )
@@ -292,36 +333,36 @@ def mwa_gridder_cli() -> None:
         "-o",
         "--overlap",
         type=float,
-        help="""The minimum overlap fraction of beam FWHM. 
+        help="""The minimum overlap fraction of beam FWHM.
         (A negative number adds unfilled space between beam pointings.)""",
         default=0.2,
     )
     parser.add_argument(
         "--write",
         action="store_true",
-        help="Toggle writing computed pointing centres to file 'pointings.txt'",
+        help="Toggle writing computed pointing centres to file "
+        "'pointings.txt'",
         default=False,
     )
     parser.add_argument(
-        "--show",
-        action="store_true",
-        help="Show plot of computed pointings on the sky plane.",
-        default=False,
-    )
-    parser.add_argument(
-        "--use_simple_fov",
+        "--use-simple-fov",
         action="store_true",
         help="Use a naive FWHM = 1.22λ/Bmax approximation.",
         default=False,
     )
     parser.add_argument(
-        "--eff_baseline_frac",
+        "--eff-baseline-frac",
         type=float,
         help="""Calculate the effective baseline by ensuring this fraction of
         baselines are captured within the highest density interval.""",
         default=0.90,
     )
-
+    parser.add_argument(
+        "--tile-flags",
+        type=str,
+        help="A comma-separated list of tile names or IDs to flag.",
+        default=None,
+    )
     generate_mwa_grid(parser)
 
 
@@ -335,16 +376,20 @@ def generate_mwa_grid(parser: argparse.ArgumentParser):
         char_bline, max_bline, hdi_bline, blines = find_maximum_mwa_baseline(
             mwa_context,
             hdi_prob=args.eff_baseline_frac,
+            extra_tile_flags=args.tile_flags
         )
         plot_mwa_baseline_distribution(
             mwa_context,
             hdi_prob=args.eff_baseline_frac,
+            extra_tile_flags=args.tile_flags
         )
-        eff_bline = np.max(hdi_bline) * u.m
-        # Take the maximum of the HDI (highest density interval) as the effective array Bmax,
-        # as it represents that (eff_baseline_frac * 100)% of baselines are equal or less than
-        # this value, i.e., short baselines dominate while preserving the fact that there are
-        # sufficient baselines of length > max(HDI) which will act to increase the effective array Bmax.
+        eff_bline = hdi_bline.max()
+        # Take the maximum of the HDI (highest density interval) as the
+        # effective array Bmax, as it represents that
+        # (eff_baseline_frac * 100)% of baselines are equal or less than
+        # this value, i.e., short baselines dominate while preserving the
+        # fact that there are sufficient baselines of length > max(HDI) which
+        # will act to increase the effective array Bmax.
 
     # Overrides, if provides
     if args.freq:
@@ -352,7 +397,7 @@ def generate_mwa_grid(parser: argparse.ArgumentParser):
     if args.bmax:
         eff_bline = args.bmax * u.m
         char_bline = eff_bline
-        max_bline = eff_bline
+        max_bline = eff_blin
 
     if args.use_simple_fov:
         fov = fwhm(freq_hz, max_bline, scale="airy")
@@ -361,7 +406,11 @@ def generate_mwa_grid(parser: argparse.ArgumentParser):
     print(f"Maximum baseline, Bmax = {max_bline:g}")
     print(f"Approx. mode of baselines = {char_bline:g}")
     print(f"Effective baseline, Beff = {eff_bline:g}")
-    print(f"Centre frequency, f = {freq_hz.to(u.MHz):g}  λ = {(c.c/freq_hz).to(u.m):g}")
+    print(
+        f"Centre frequency, "
+        f"f = {freq_hz.to(u.MHz):g}  "
+        f"λ = {(c.c/freq_hz).to(u.m):g}"
+    )
     if args.use_simple_fov:
         print(f"FWHM ~ 1.22λ/Bmax ~ {fov.to(u.deg):g} = {fov.to(u.arcmin):g}")
     else:
@@ -374,16 +423,32 @@ def generate_mwa_grid(parser: argparse.ArgumentParser):
         frame="icrs",
     )
     overlap = args.overlap
+    # Since the TAB shape becomes more elongated as the centre moves away from zenith
+    # the elongation affects the ratio of major/minor axes as ~1/sin(el)
+    if args.metafits is not None:
+        overlap0 = overlap
+        k = 0.8
+        alt = mwa_context.alt_rad
+        overlap = overlap0 + k * (1 - np.sin(alt))
+        print("Adjusting overlap to approx. account for project effects")
+        print(f"    New overlap = {overlap0} + {k} * (1 - sin({mwa_context.alt_deg:g})) = {overlap}")
+
+        if overlap > 0.75:
+            print("Restricting overlap to 0.75")
+            overlap = 0.75
+
     n_rings = args.nrings
-    # Number of pointings = 1 + 6*N*(N-1)/2 total beams (centered-hexagonal numbers, one-based)
+    # Number of pointings = 1 + 6*N*(N-1)/2 total beams
+    # (centered-hexagonal numbers, one-based)
     n_pts = 1 + 6 * (n_rings + 1) * (n_rings) // 2  # zero-based
 
     print(
-        f"Generating centred hexagonal grid with {n_rings} concentric rings = {n_pts} pointings"
+        f"Generating centred hexagonal grid with {n_rings} concentric rings = "
+        f"{n_pts} pointings"
     )
     grid_points = hex_grid_tangent_plane(center, fov, overlap, n_rings)
-    if args.show:
-        plot_pointings_with_projection(grid_points, fov=fov)
+
+    plot_pointings_with_projection(grid_points, fov=fov)
 
     if not args.write:
         for gp in grid_points:
@@ -391,7 +456,8 @@ def generate_mwa_grid(parser: argparse.ArgumentParser):
     else:
         with open("pointings.txt", "w") as fh:
             for gp in grid_points:
-                fh.write(f"{gp.to_string('hmsdms', sep=':', pad=True, precision=3)}\n")
+                gp_str = gp.to_string("hmsdms", sep=":", pad=True, precision=3)
+                fh.write(f"{gp_str}\n")
 
 
 if __name__ == "__main__":
