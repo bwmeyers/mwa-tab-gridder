@@ -1,19 +1,16 @@
-#!/usr/bin/env python
 
 import argparse
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.spatial.distance import cdist
 
 import arviz as az
-
-from astropy.coordinates import SkyCoord, SkyOffsetFrame
-import astropy.units as u
 import astropy.constants as c
-from astropy.wcs import WCS
+import astropy.units as u
+import matplotlib.pyplot as plt
+import numpy as np
+from astropy.coordinates import SkyCoord, SkyOffsetFrame
 from astropy.visualization.wcsaxes import SphericalCircle, add_scalebar
-
+from astropy.wcs import WCS
 from mwalib import MetafitsContext, Pol
+from scipy.spatial.distance import cdist
 
 
 def hex_grid_tangent_plane(
@@ -41,7 +38,7 @@ def hex_grid_tangent_plane(
 
     # Loop over concentric hex rings
     pointings = []
-    for r in range(0, rings + 1):
+    for r in range(rings + 1):
         if r == 0:
             # Create offset in tangent plane
             offset = SkyCoord(0 * u.deg, 0 * u.deg, frame=tangent_frame)
@@ -53,12 +50,8 @@ def hex_grid_tangent_plane(
                 angle = (np.pi / 3) * i
                 for j in range(r):
                     # Compute hex steps
-                    x = (
-                        r * np.cos(angle) - j * np.cos(angle + np.pi / 3)
-                    ) * dx
-                    y = (
-                        r * np.sin(angle) - j * np.sin(angle + np.pi / 3)
-                    ) * dy
+                    x = (r * np.cos(angle) - j * np.cos(angle + np.pi / 3)) * dx
+                    y = (r * np.sin(angle) - j * np.sin(angle + np.pi / 3)) * dy
 
                     # Create offset in tangent plane
                     offset = SkyCoord(x, y, frame=tangent_frame)
@@ -157,22 +150,34 @@ def plot_pointings_with_projection(
     )
 
     ax.grid(color="gray", ls="dotted")
-    plt.savefig(
-        "pointing_grid.png", dpi=200, bbox_inches="tight"
-    )
+    plt.savefig("pointing_grid.png", dpi=200, bbox_inches="tight")
 
 
-def find_maximum_mwa_baseline(
+def find_characteristic_baseline(
     context: MetafitsContext,
-    hdi_prob: float = 0.90,
-    extra_tile_flags: list[str] | None = None
-) -> tuple[
-    u.Quantity["length"],
-    u.Quantity["length"],
-    np.ndarray,
-    np.ndarray,
-]:
-    """From the observation metadata, compute the tile maximum baseline."""
+    hdi_prob: float = 0.9,
+    extra_tile_flags: list[str] | None = None,
+    exclude_flagged: bool = True,
+) -> tuple[float, np.ndarray, float, np.ndarray]:
+    """From the observation metadata, compute the tile effective and
+    maximum baselines, as well as the baseline distribution.
+
+    Args:
+        context (MetafitsContext): A mwalib.MetafitsContext object that contains the
+            array configuration and delay settings.
+        hdi_prob (float, optional): Fraction of baselines to be included for the
+            highest-density interval. Defaults to 0.9.
+        extra_tile_flags (list[str] | None, optional): A list of additional
+        tile names to flag as bad. Defaults to None.
+        exclude_flagged (bool, optional): Whether to exclude flagged tiles
+            from the baseline distribution.
+    Returns:
+        tuple[float, float, np.ndarray, np.ndarray]: A tuple containing:
+            (1) The baseline mode (i.e., the most common baseline length),
+            (2) The maximum baseline,
+            (3) The highest-density interval, and
+            (4) The baseline distribution.
+    """
     tile_positions = np.array(
         [
             np.array([rf.east_m, rf.north_m, rf.height_m])
@@ -180,10 +185,7 @@ def find_maximum_mwa_baseline(
             if rf.pol == Pol.X
         ]
     )
-    tile_flags = np.array(
-        [rf.flagged for rf in context.rf_inputs if rf.pol == Pol.X]
-    )
-
+    tile_flags = np.array([rf.flagged for rf in context.rf_inputs if rf.pol == Pol.X])
     if extra_tile_flags is not None:
         itile = 0
         for rf in context.rf_inputs:
@@ -193,42 +195,51 @@ def find_maximum_mwa_baseline(
                 tile_flags[itile] = True
             itile += 1
 
-    tile_positions = np.delete(
-        tile_positions, np.where(tile_flags & True), axis=0
-    )
+    if exclude_flagged:
+        tile_positions = np.delete(
+            tile_positions,
+            np.where(tile_flags & True),
+            axis=0,
+        )
 
     dist = cdist(tile_positions, tile_positions)
-    dist = np.delete(
-        dist.flatten(), np.where(dist.flatten() <= 0.01)
-    )  # remove autos
+    dist = np.delete(dist.flatten(), np.where(dist.flatten() <= 0.01))  # remove autos
     max_dist = np.max(dist) * u.m
     distances = dist * u.m
 
     # use a KDE approach to estimate the mode of the baseline distribution
-    grid, density = az.kde(dist)
+    grid, density, _ = az.kde(dist)
     dist_mode = grid[np.argmax(density)] * u.m
-    dist_hdi = np.asarray(az.hdi(dist, hdi_prob=hdi_prob, multimodal=False)) * 1*u.m
+    dist_hdi = np.asarray(az.hdi(dist, prob=hdi_prob, method="nearest")) * u.m
 
     return dist_mode, max_dist, dist_hdi, distances
 
 
-def plot_mwa_baseline_distribution(
+def plot_baseline_distribution(
     context: MetafitsContext,
-    hdi_prob: float = 0.90,
-    extra_tile_flags: list[str] | None = None
+    hdi_prob: float = 0.9,
+    extra_tile_flags: list[str] | None = None,
+    show_flagged_tiles: bool = True,
 ) -> None:
-    """Plot the baseline distribution and indicate the highest-density
-    interval(s)."""
-    b_mode, b_max, hdi, b = find_maximum_mwa_baseline(
+    """Plot the baseline distribution and indicate the highest-density interval(s).
+
+    Args:
+        context (MetafitsContext): A mwalib.MetafitsContext object that contains the
+            array configuration and delay settings.
+        extra_tile_flags (list[str] | None, optional): A list of additional
+            tile names to flag as bad. Defaults to None.
+        show_flagged_tiles (bool): Plot the flagged tiles in a different colour.
+            Default: True.
+    """
+    _, max_baseline, hdi_baseline, baselines = find_characteristic_baseline(
         context,
         hdi_prob=hdi_prob,
         extra_tile_flags=extra_tile_flags,
+        exclude_flagged=show_flagged_tiles,
     )
-    b_eff = hdi.max()
+    eff_baseline = np.max(hdi_baseline)
 
-    tile_flags = np.array(
-        [rf.flagged for rf in context.rf_inputs if rf.pol == Pol.X]
-    )
+    tile_flags = np.array([rf.flagged for rf in context.rf_inputs if rf.pol == Pol.X])
     if extra_tile_flags is not None:
         itile = 0
         for rf in context.rf_inputs:
@@ -243,15 +254,25 @@ def plot_mwa_baseline_distribution(
 
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot()
-    ax.hist([x.value for x in b], bins=np.arange(0, b.max().value, 10))
+    ax.hist([b.value for b in baselines], bins=np.arange(0, max_baseline.value, 10))
     ymax = max(ax.get_ylim())
 
-    ax.fill_between([h.value for h in hdi], 0, ymax, color="0.8", alpha=0.5)
-    ax.axvline(b_eff.value, ls=":", color="k")
+    if len(np.shape(hdi_baseline)) > 1:
+        for i in list(hdi_baseline):
+            ax.fill_between(i.value, 0, ymax, color="0.8", alpha=0.5)
+    else:
+        ax.fill_between(
+            [h.value for h in hdi_baseline],
+            0,
+            ymax,
+            color="0.8",
+            alpha=0.5,
+        )
+    ax.axvline(eff_baseline.value, ls=":", color="k")
     ax.text(
         x=0.95,
         y=0.95,
-        s=f"Number of baselines = {len(b)}\n"
+        s=f"Number of baselines = {len(baselines)}\n"
         + f"Number of 'good' tiles = {num_ok_tiles}\n"
         + f"Number of flagged tiles = {num_bad_tiles}",
         transform=ax.transAxes,
@@ -265,14 +286,12 @@ def plot_mwa_baseline_distribution(
     plt.ylabel("Frequency of baseline length", fontsize=14)
     plt.title(
         f"Observation ID: {context.obs_id}  ({context.sched_start_utc})\n"
-        + rf"Max. baseline $\approx$ {b_max:.0f} "
-        + rf"Characteristic baseline $\approx$ {b_eff:.0f}"
+        + rf"Max. baseline $\approx$ {max_baseline * u.m:.0f}  "
+        + rf"Characteristic baseline $\approx$ {eff_baseline:.0f}"
     )
     plt.minorticks_on()
     plt.tick_params(labelsize=12)
-    plt.savefig(
-        f"{context.obs_id}_baseline_dist.png", dpi=200, bbox_inches="tight"
-    )
+    plt.savefig(f"{context.obs_id}_baseline_dist.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -294,15 +313,12 @@ def mwa_gridder_cli() -> None:
         """,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument(
-        "-m", "--metafits", type=str, help="MWA Metafits file."
-    )
+    parser.add_argument("-m", "--metafits", type=str, help="MWA Metafits file.")
     parser.add_argument(
         "-f",
         "--freq",
         type=float,
-        help="Observing frequency (Hz). Overrides what is in provided "
-        "metafits file.",
+        help="Observing frequency (Hz). Overrides what is in provided metafits file.",
     )
     parser.add_argument(
         "-B",
@@ -340,8 +356,7 @@ def mwa_gridder_cli() -> None:
     parser.add_argument(
         "--write",
         action="store_true",
-        help="Toggle writing computed pointing centres to file "
-        "'pointings.txt'",
+        help="Toggle writing computed pointing centres to file 'pointings.txt'",
         default=False,
     )
     parser.add_argument(
@@ -373,15 +388,15 @@ def generate_mwa_grid(parser: argparse.ArgumentParser):
     if args.metafits is not None:
         mwa_context = MetafitsContext(args.metafits)
         freq_hz = mwa_context.centre_freq_hz * u.Hz
-        char_bline, max_bline, hdi_bline, blines = find_maximum_mwa_baseline(
+        char_bline, max_bline, hdi_bline, _ = find_characteristic_baseline(
             mwa_context,
             hdi_prob=args.eff_baseline_frac,
-            extra_tile_flags=args.tile_flags
+            extra_tile_flags=args.tile_flags,
         )
-        plot_mwa_baseline_distribution(
+        plot_baseline_distribution(
             mwa_context,
             hdi_prob=args.eff_baseline_frac,
-            extra_tile_flags=args.tile_flags
+            extra_tile_flags=args.tile_flags,
         )
         eff_bline = hdi_bline.max()
         # Take the maximum of the HDI (highest density interval) as the
@@ -397,7 +412,7 @@ def generate_mwa_grid(parser: argparse.ArgumentParser):
     if args.bmax:
         eff_bline = args.bmax * u.m
         char_bline = eff_bline
-        max_bline = eff_blin
+        max_bline = eff_bline
 
     if args.use_simple_fov:
         fov = fwhm(freq_hz, max_bline, scale="airy")
@@ -407,9 +422,7 @@ def generate_mwa_grid(parser: argparse.ArgumentParser):
     print(f"Approx. mode of baselines = {char_bline:g}")
     print(f"Effective baseline, Beff = {eff_bline:g}")
     print(
-        f"Centre frequency, "
-        f"f = {freq_hz.to(u.MHz):g}  "
-        f"λ = {(c.c/freq_hz).to(u.m):g}"
+        f"Centre frequency, f = {freq_hz.to(u.MHz):g}  λ = {(c.c / freq_hz).to(u.m):g}"
     )
     if args.use_simple_fov:
         print(f"FWHM ~ 1.22λ/Bmax ~ {fov.to(u.deg):g} = {fov.to(u.arcmin):g}")
@@ -431,7 +444,9 @@ def generate_mwa_grid(parser: argparse.ArgumentParser):
         alt = mwa_context.alt_rad
         overlap = overlap0 + k * (1 - np.sin(alt))
         print("Adjusting overlap to approx. account for project effects")
-        print(f"    New overlap = {overlap0} + {k} * (1 - sin({mwa_context.alt_deg:g})) = {overlap}")
+        print(
+            f"    New overlap = {overlap0} + {k} * (1 - sin({mwa_context.alt_deg:g})) = {overlap}"
+        )
 
         if overlap > 0.75:
             print("Restricting overlap to 0.75")
